@@ -7,6 +7,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QBuffer>
 #include <QLineEdit>
 #include <QComboBox>
 #include <QSpinBox>
@@ -39,15 +40,22 @@ private:
     QComboBox* formatCombo;
     
     QPushButton* fetchObjectBtn;
+    QPushButton* fetchCompositeBtn;
     QPushButton* saveImageBtn;
     QPushButton* autoFetchAllBtn;
     
     QByteArray currentImageData;
     QImage currentImage;
     MessierObject currentObject;
+    
+    // For composite image fetching
+    QImage irImage, redImage, blueImage;
+    int compositeFetchCount;
+    bool fetchingComposite;
 
 public:
-    DSSViewerWindow(QWidget* parent = nullptr) : QWidget(parent) {
+    DSSViewerWindow(QWidget* parent = nullptr) : QWidget(parent), 
+        compositeFetchCount(0), fetchingComposite(false) {
         setWindowTitle("DSS Image Fetcher - Messier Catalog");
         resize(1200, 900);
         
@@ -162,9 +170,13 @@ private:
         leftPanel->addWidget(paramGroup);
         
         // Action buttons
-        fetchObjectBtn = new QPushButton("Fetch Selected Object");
+        fetchObjectBtn = new QPushButton("Fetch Selected Survey");
         fetchObjectBtn->setStyleSheet("QPushButton { padding: 8px; font-weight: bold; }");
         leftPanel->addWidget(fetchObjectBtn);
+        
+        fetchCompositeBtn = new QPushButton("Fetch False Color Composite (IR/Red/Blue)");
+        fetchCompositeBtn->setStyleSheet("QPushButton { padding: 8px; font-weight: bold; background-color: #4CAF50; color: white; }");
+        leftPanel->addWidget(fetchCompositeBtn);
         
         autoFetchAllBtn = new QPushButton("Auto-Fetch All Imaged Objects");
         autoFetchAllBtn->setEnabled(false); // Enable this feature later if needed
@@ -217,6 +229,7 @@ private:
     void connectSignals() {
         // Fetch buttons
         connect(fetchObjectBtn, &QPushButton::clicked, this, &DSSViewerWindow::onFetchObject);
+        connect(fetchCompositeBtn, &QPushButton::clicked, this, &DSSViewerWindow::onFetchComposite);
         connect(saveImageBtn, &QPushButton::clicked, this, &DSSViewerWindow::onSaveImage);
         
         // Object selection
@@ -347,6 +360,7 @@ private slots:
             return;
         }
         
+        fetchingComposite = false;
         statusLabel->setText(QString("Fetching DSS image for %1...").arg(currentObject.name));
         progressBar->show();
         setControlsEnabled(false);
@@ -363,7 +377,157 @@ private slots:
                                    format);
     }
     
+    void onFetchComposite() {
+        if (currentObject.name.isEmpty()) {
+            QMessageBox::warning(this, "No Selection", "Please select a Messier object first!");
+            return;
+        }
+        
+        fetchingComposite = true;
+        compositeFetchCount = 0;
+        irImage = QImage();
+        redImage = QImage();
+        blueImage = QImage();
+        
+        statusLabel->setText(QString("Fetching composite image for %1 (1/3: IR)...").arg(currentObject.name));
+        progressBar->show();
+        progressBar->setRange(0, 3);
+        progressBar->setValue(0);
+        setControlsEnabled(false);
+        
+        // Fetch IR first
+        fetcher->fetchByCoordinates(currentObject.sky_position.ra_deg,
+                                   currentObject.sky_position.dec_deg,
+                                   widthSpinBox->value(),
+                                   heightSpinBox->value(),
+                                   DSSurvey::POSS2UKSTU_IR,
+                                   ImageFormat::GIF);
+    }
+    
+    void continueCompositeFetch() {
+        compositeFetchCount++;
+        progressBar->setValue(compositeFetchCount);
+        
+        if (compositeFetchCount == 1) {
+            // Fetch Red next
+            statusLabel->setText(QString("Fetching composite image for %1 (2/3: Red)...").arg(currentObject.name));
+            fetcher->fetchByCoordinates(currentObject.sky_position.ra_deg,
+                                       currentObject.sky_position.dec_deg,
+                                       widthSpinBox->value(),
+                                       heightSpinBox->value(),
+                                       DSSurvey::POSS2UKSTU_RED,
+                                       ImageFormat::GIF);
+        } else if (compositeFetchCount == 2) {
+            // Fetch Blue last
+            statusLabel->setText(QString("Fetching composite image for %1 (3/3: Blue)...").arg(currentObject.name));
+            fetcher->fetchByCoordinates(currentObject.sky_position.ra_deg,
+                                       currentObject.sky_position.dec_deg,
+                                       widthSpinBox->value(),
+                                       heightSpinBox->value(),
+                                       DSSurvey::POSS2UKSTU_BLUE,
+                                       ImageFormat::GIF);
+        } else if (compositeFetchCount == 3) {
+            // All images fetched, create composite
+            createFalseColorComposite();
+        }
+    }
+    
+    void createFalseColorComposite() {
+        statusLabel->setText(QString("Creating false color composite for %1...").arg(currentObject.name));
+        
+        // Ensure all images are the same size
+        if (irImage.isNull() || redImage.isNull() || blueImage.isNull()) {
+            QMessageBox::critical(this, "Error", "Failed to fetch all required images for composite!");
+            progressBar->hide();
+            setControlsEnabled(true);
+            fetchingComposite = false;
+            return;
+        }
+        
+        // Get dimensions (use the smallest common size)
+        int width = qMin(qMin(irImage.width(), redImage.width()), blueImage.width());
+        int height = qMin(qMin(irImage.height(), redImage.height()), blueImage.height());
+        
+        // Scale all images to same size if needed
+        if (irImage.size() != QSize(width, height)) {
+            irImage = irImage.scaled(width, height, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
+        if (redImage.size() != QSize(width, height)) {
+            redImage = redImage.scaled(width, height, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
+        if (blueImage.size() != QSize(width, height)) {
+            blueImage = blueImage.scaled(width, height, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
+        
+        // Convert to RGB32 format for processing
+        irImage = irImage.convertToFormat(QImage::Format_RGB32);
+        redImage = redImage.convertToFormat(QImage::Format_RGB32);
+        blueImage = blueImage.convertToFormat(QImage::Format_RGB32);
+        
+        // Create composite image: R=IR, G=Red, B=Blue
+        QImage composite(width, height, QImage::Format_RGB32);
+        
+        for (int y = 0; y < height; ++y) {
+            QRgb* compositeLine = reinterpret_cast<QRgb*>(composite.scanLine(y));
+            const QRgb* irLine = reinterpret_cast<const QRgb*>(irImage.constScanLine(y));
+            const QRgb* redLine = reinterpret_cast<const QRgb*>(redImage.constScanLine(y));
+            const QRgb* blueLine = reinterpret_cast<const QRgb*>(blueImage.constScanLine(y));
+            
+            for (int x = 0; x < width; ++x) {
+                // Extract grayscale values from each channel (using red channel as it's brightest in grayscale)
+                int irValue = qRed(irLine[x]);
+                int redValue = qRed(redLine[x]);
+                int blueValue = qRed(blueLine[x]);
+                
+                // Create false color: R=IR, G=Red, B=Blue
+                compositeLine[x] = qRgb(irValue, redValue, blueValue);
+            }
+        }
+        
+        // Display the composite
+        currentImage = composite;
+        
+        // Convert to byte array for saving
+        QBuffer buffer(&currentImageData);
+        buffer.open(QIODevice::WriteOnly);
+        composite.save(&buffer, "PNG");
+        
+        // Scale image to fit label
+        QPixmap pixmap = QPixmap::fromImage(composite);
+        imageLabel->setPixmap(pixmap.scaled(imageLabel->size(), 
+                                           Qt::KeepAspectRatio, 
+                                           Qt::SmoothTransformation));
+        
+        statusLabel->setText(QString("False color composite created for %1! (R=IR, G=Red, B=Blue) Size: %2×%3")
+                            .arg(currentObject.name)
+                            .arg(width)
+                            .arg(height));
+        statusLabel->setStyleSheet("QLabel { padding: 5px; background-color: #d4edda; color: #155724; }");
+        
+        progressBar->hide();
+        progressBar->setRange(0, 0);
+        setControlsEnabled(true);
+        saveImageBtn->setEnabled(true);
+        fetchingComposite = false;
+    }
+    
     void onImageReceived(const QImage& image, const QByteArray& rawData) {
+        if (fetchingComposite) {
+            // Store image based on fetch count
+            if (compositeFetchCount == 0) {
+                irImage = image;
+            } else if (compositeFetchCount == 1) {
+                redImage = image;
+            } else if (compositeFetchCount == 2) {
+                blueImage = image;
+            }
+            
+            // Continue to next image or create composite
+            continueCompositeFetch();
+            return;
+        }
+        
+        // Normal single image fetch
         currentImage = image;
         currentImageData = rawData;
         
@@ -400,14 +564,23 @@ private slots:
     }
     
     void onError(const QString& error) {
-        statusLabel->setText(QString("Error fetching %1: %2")
-                            .arg(currentObject.name)
-                            .arg(error));
+        if (fetchingComposite) {
+            statusLabel->setText(QString("Error fetching composite for %1: %2")
+                                .arg(currentObject.name)
+                                .arg(error));
+            fetchingComposite = false;
+        } else {
+            statusLabel->setText(QString("Error fetching %1: %2")
+                                .arg(currentObject.name)
+                                .arg(error));
+        }
+        
         statusLabel->setStyleSheet("QLabel { padding: 5px; background-color: #f8d7da; color: #721c24; }");
         
         QMessageBox::critical(this, "Fetch Error", error);
         
         progressBar->hide();
+        progressBar->setRange(0, 0);
         setControlsEnabled(true);
     }
     
@@ -420,12 +593,12 @@ private slots:
         QString filter;
         QString defaultName = currentObject.name.replace(" ", "_");
         
-        if (formatCombo->currentData().toInt() == (int)ImageFormat::FITS) {
+        if (fetchingComposite || formatCombo->currentData().toInt() == (int)ImageFormat::GIF) {
+            filter = "PNG Images (*.png);;GIF Images (*.gif);;All Files (*)";
+            defaultName += "_composite.png";
+        } else {
             filter = "FITS Files (*.fits);;All Files (*)";
             defaultName += ".fits";
-        } else {
-            filter = "GIF Images (*.gif);;PNG Images (*.png);;All Files (*)";
-            defaultName += ".gif";
         }
         
         QString fileName = QFileDialog::getSaveFileName(this,
@@ -447,6 +620,7 @@ private slots:
     
     void setControlsEnabled(bool enabled) {
         fetchObjectBtn->setEnabled(enabled);
+        fetchCompositeBtn->setEnabled(enabled);
         messierObjectCombo->setEnabled(enabled);
         messierObjectList->setEnabled(enabled);
         imagedOnlyCheckbox->setEnabled(enabled);
