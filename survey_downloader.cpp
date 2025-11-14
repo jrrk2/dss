@@ -1,6 +1,6 @@
 // survey_downloader.cpp - Download survey images for plate solver testing
 // Integrates with existing ProperHipsClient infrastructure
-#include <QCoreApplication>
+#include <QApplication>
 #include <QCommandLineParser>
 #include <QDebug>
 #include <QDir>
@@ -36,6 +36,8 @@ public:
         qDebug() << QString("Coordinates: RA=%1°, Dec=%2°").arg(ra_deg).arg(dec_deg);
         
         m_currentName = name;
+        m_currentRA = ra_deg;
+        m_currentDec = dec_deg;
         
         // Create sky position
         SkyPosition pos;
@@ -187,8 +189,25 @@ private slots:
             return;
         }
         
+        qDebug() << "✅ Image generated:" << image.width() << "x" << image.height();
+        
         // Resize to match your camera resolution
         QImage resized = image.scaled(3072, 2048, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        
+        // If aspect ratio doesn't match, create black letterbox
+        if (resized.width() != 3072 || resized.height() != 2048) {
+            QImage final(3072, 2048, QImage::Format_RGB888);
+            final.fill(Qt::black);
+            
+            int x = (3072 - resized.width()) / 2;
+            int y = (2048 - resized.height()) / 2;
+            
+            QPainter painter(&final);
+            painter.drawImage(x, y, resized);
+            painter.end();
+            
+            resized = final;
+        }
         
         // Save the image
         QString filename = QString("%1/%2.png").arg(m_outputDir).arg(m_currentName);
@@ -198,10 +217,11 @@ private slots:
             qDebug() << "✅ Saved:" << filename;
             qDebug() << "   Size:" << resized.width() << "x" << resized.height();
             
-            // Record this download
+            // Record this download with current position info
             TestPosition pos;
             pos.name = m_currentName;
-            // Extract RA/Dec from current position (would need to store this)
+            pos.ra_deg = m_currentRA;
+            pos.dec_deg = m_currentDec;
             m_downloadedImages.append(pos);
         } else {
             qDebug() << "❌ Failed to save:" << filename;
@@ -217,7 +237,7 @@ private slots:
             qDebug() << "Total images:" << m_downloadedImages.size();
             qDebug() << "Location:" << m_outputDir;
             generateMetadataFile();
-            QTimer::singleShot(1000, qApp, &QCoreApplication::quit);
+            QTimer::singleShot(1000, qApp, &QApplication::quit);
             return;
         }
         
@@ -235,6 +255,8 @@ private:
     EnhancedMosaicCreator* m_mosaicCreator;
     QString m_outputDir;
     QString m_currentName;
+    double m_currentRA;
+    double m_currentDec;
     
     struct TestPosition {
         QString name;
@@ -276,7 +298,7 @@ private:
 };
 
 int main(int argc, char *argv[]) {
-    QCoreApplication app(argc, argv);
+    QApplication app(argc, argv);
     app.setApplicationName("Survey Image Downloader");
     app.setApplicationVersion("1.0");
     

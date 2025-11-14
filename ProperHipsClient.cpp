@@ -41,6 +41,17 @@ QList<long long> ProperHipsClient::getNeighboringPixels(long long centerPixel, i
 // [6] = SE (Southeast)
 // [7] = S  (South)
 
+// ProperHipsClient.cpp - CORRECTED neighbor calculation
+// Replace the getDirectionalNeighbors and createProper3x3Grid methods
+
+// ProperHipsClient.cpp - CORRECTED neighbor calculation
+// Replace the getDirectionalNeighbors and createProper3x3Grid methods
+
+// ProperHipsClient.cpp - CORRECTED neighbor calculation
+// Replace the getDirectionalNeighbors and createProper3x3Grid methods
+// ProperHipsClient.cpp - CORRECTED neighbor calculation
+// Replace the getDirectionalNeighbors and createProper3x3Grid methods
+
 QMap<QString, long long> ProperHipsClient::getDirectionalNeighbors(long long centerPixel, int order) const {
     QMap<QString, long long> directionalNeighbors;
     
@@ -51,20 +62,37 @@ QMap<QString, long long> ProperHipsClient::getDirectionalNeighbors(long long cen
         fix_arr<int,8> neighborArray;
         healpix.neighbors(centerPixel, neighborArray);
         
-        // Standard HEALPix neighbor order (counter-clockwise from SW)
-	// originally  QStringList directions = {"SW", "W", "NW", "N", "NE", "E", "SE", "S"};
-        // manual based on M51 QStringList directions = {"N", "NE", "E", "SW", "SE", "S", "NW", "W"};
-	QStringList directions = {"S", "SE", "E", "NE", "N", "NW", "W", "SW"};
+        // Based on empirical testing with M31 at Order 6:
+        // CRITICAL: These strings must match what createProper3x3Grid() expects!
+        QStringList directions = {"SW", "W", "NW", "N", "NE", "E", "SE", "S"};
         
         qDebug() << "Directional neighbors for pixel" << centerPixel << ":";
         for (int i = 0; i < 8; i++) {
             if (neighborArray[i] >= 0) {
-                directionalNeighbors[directions[i]] = neighborArray[i];
-                qDebug() << QString("  %1: %2").arg(directions[i]).arg(neighborArray[i]);
+                long long pixel = neighborArray[i];
+                QString dir = directions[i];
+                
+                qDebug() << QString("  Iteration %1: Adding %2: %3").arg(i).arg(dir).arg(pixel);
+                directionalNeighbors.insert(dir, pixel);
+                qDebug() << QString("    Map size is now: %1").arg(directionalNeighbors.size());
+                
+                // Verify it was added
+                if (directionalNeighbors.contains(dir)) {
+                    qDebug() << QString("    ✓ Verified %1 -> %2").arg(dir).arg(directionalNeighbors[dir]);
+                } else {
+                    qDebug() << QString("    ✗ FAILED to add %1!").arg(dir);
+                }
             } else {
-                qDebug() << QString("  %1: NO NEIGHBOR").arg(directions[i]);
+                qDebug() << QString("  %1: NO NEIGHBOR (edge of sky)").arg(directions[i]);
             }
         }
+        
+        // DEBUG: Final verification
+        qDebug() << "Final map contents:";
+        for (auto it = directionalNeighbors.begin(); it != directionalNeighbors.end(); ++it) {
+            qDebug() << "  " << it.key() << "->" << it.value();
+        }
+        qDebug() << "Map has" << directionalNeighbors.size() << "total entries";
         
     } catch (const std::exception& e) {
         qDebug() << "HEALPix directional neighbors error:" << e.what();
@@ -77,22 +105,99 @@ QMap<QString, long long> ProperHipsClient::getDirectionalNeighbors(long long cen
 QList<QList<long long>> ProperHipsClient::createProper3x3Grid(long long centerPixel, int order) const {
     QMap<QString, long long> neighbors = getDirectionalNeighbors(centerPixel, order);
     
-    // Map directions to 3x3 grid positions
-    // Grid layout:
-    // [NW] [N ] [NE]
-    // [W ] [C ] [E ]  
-    // [SW] [S ] [SE]
+    // DEBUG: Print what we got from the map
+    qDebug() << "Building grid with neighbors map:";
+    for (auto it = neighbors.begin(); it != neighbors.end(); ++it) {
+        qDebug() << "  " << it.key() << "->" << it.value();
+    }
     
-    QList<QList<long long>> grid = {
-        // Bottom row: SW, S, SE
-        {neighbors.value("SW", -1), neighbors.value("S", -1), neighbors.value("SE", -1)},
-        // Middle row: W, Center, E  
-        {neighbors.value("W", -1), centerPixel, neighbors.value("E", -1)},
-        // Top row: NW, N, NE
-        {neighbors.value("NW", -1), neighbors.value("N", -1), neighbors.value("NE", -1)}
-    };
+    // Map the 8 immediate HEALPix neighbors to a 3x3 grid
+    // Note: HEALPix uses hexagonal tiling, not square, so N and NE
+    // positions are approximations of the actual hexagonal neighbors
+    //
+    // Grid layout:
+    // Row 0 (top):    [NW]   [N]   [NE]
+    // Row 1 (middle): [W]  [CENTER] [E]
+    // Row 2 (bottom): [SW]   [S]   [SE]
+    
+    QList<QList<long long>> grid;
+    
+    // Row 0 (top)
+    long long nw = neighbors.value("NW", centerPixel);
+    long long n = neighbors.value("N", centerPixel);
+    long long ne = neighbors.value("NE", centerPixel);
+    qDebug() << QString("Row 0: NW=%1, N=%2, NE=%3").arg(nw).arg(n).arg(ne);
+    grid.append({nw, n, ne});
+    
+    // Row 1 (middle)
+    long long w = neighbors.value("W", centerPixel);
+    long long e = neighbors.value("E", centerPixel);
+    qDebug() << QString("Row 1: W=%1, CENTER=%2, E=%3").arg(w).arg(centerPixel).arg(e);
+    grid.append({w, centerPixel, e});
+    
+    // Row 2 (bottom)
+    long long sw = neighbors.value("SW", centerPixel);
+    long long s = neighbors.value("S", centerPixel);
+    long long se = neighbors.value("SE", centerPixel);
+    qDebug() << QString("Row 2: SW=%1, S=%2, SE=%3").arg(sw).arg(s).arg(se);
+    grid.append({sw, s, se});
+    
+    // Debug output
+    qDebug() << "3x3 Grid layout:";
+    qDebug() << QString("  [%1] [%2] [%3]  <- Row 0 (North)")
+                .arg(grid[0][0], 6).arg(grid[0][1], 6).arg(grid[0][2], 6);
+    qDebug() << QString("  [%1] [%2] [%3]  <- Row 1 (Center)")
+                .arg(grid[1][0], 6).arg(grid[1][1], 6).arg(grid[1][2], 6);
+    qDebug() << QString("  [%1] [%2] [%3]  <- Row 2 (South)")
+                .arg(grid[2][0], 6).arg(grid[2][1], 6).arg(grid[2][2], 6);
     
     return grid;
+}
+
+// VERIFICATION METHOD - Add this to test the grid
+void ProperHipsClient::verifyGridAlignment(long long centerPixel, int order) const {
+    QList<QList<long long>> grid = createProper3x3Grid(centerPixel, order);
+    
+    qDebug() << "\n=== Verifying Grid Alignment ===";
+    qDebug() << "Center pixel:" << centerPixel << "at order" << order;
+    
+    long long nside = 1LL << order;
+    Healpix_Base healpix(nside, NEST, SET_NSIDE);
+    
+    // Get center position
+    pointing center_pt = healpix.pix2ang(centerPixel);
+    double center_ra = center_pt.phi * 180.0 / M_PI;
+    double center_dec = 90.0 - center_pt.theta * 180.0 / M_PI;
+    
+    qDebug() << QString("Center: RA=%1°, Dec=%2°").arg(center_ra, 0, 'f', 4).arg(center_dec, 0, 'f', 4);
+    
+    // Check each neighbor's position
+    for (int row = 0; row < 3; row++) {
+        for (int col = 0; col < 3; col++) {
+            long long pixel = grid[row][col];
+            pointing pt = healpix.pix2ang(pixel);
+            double ra = pt.phi * 180.0 / M_PI;
+            double dec = 90.0 - pt.theta * 180.0 / M_PI;
+            
+            double delta_ra = (ra - center_ra) * cos(center_dec * M_PI / 180.0);
+            double delta_dec = dec - center_dec;
+            
+            QString position = (row == 1 && col == 1) ? "CENTER" : QString("(%1,%2)").arg(col).arg(row);
+            qDebug() << QString("  %1: pixel %2 -> RA=%3°, Dec=%4° (Δ: %5°, %6°)")
+                        .arg(position, -8)
+                        .arg(pixel, 6)
+                        .arg(ra, 8, 'f', 4)
+                        .arg(dec, 8, 'f', 4)
+                        .arg(delta_ra, 7, 'f', 3)
+                        .arg(delta_dec, 7, 'f', 3);
+        }
+    }
+    
+    // Calculate expected vs actual tile size
+    double pixel_size_deg = sqrt(4.0 * M_PI / (12.0 * nside * nside)) * 180.0 / M_PI;
+    qDebug() << QString("\nExpected pixel size: %1° (%2 arcmin)")
+                .arg(pixel_size_deg, 0, 'f', 4)
+                .arg(pixel_size_deg * 60.0, 0, 'f', 2);
 }
 
 ProperHipsClient::ProperHipsClient(QObject *parent) 

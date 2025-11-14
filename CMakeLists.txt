@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Find required packages
-find_package(Qt6 COMPONENTS Core Widgets Network REQUIRED)
+find_package(Qt5 COMPONENTS Core Widgets Network REQUIRED)
 
 # Set up pkg-config paths for INDI and CFITSIO
 set(ENV{PKG_CONFIG_PATH} "/usr/local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
@@ -105,9 +105,9 @@ set_target_properties(survey_downloader PROPERTIES AUTOMOC TRUE)
 
 # Link libraries
 target_link_libraries(survey_downloader PRIVATE
-  Qt6::Core
-  Qt6::Widgets
-  Qt6::Network
+  Qt5::Core
+  Qt5::Widgets
+  Qt5::Network
   ${INDI_LIBRARIES}
   ${CFITSIO_LIBRARIES}
   ${STELLARSOLVER_LIBRARIES}

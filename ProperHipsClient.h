@@ -78,6 +78,7 @@ public:
     QList<long long> getNeighboringPixels(long long centerPixel, int order) const;
     QMap<QString, long long> getDirectionalNeighbors(long long centerPixel, int order) const;
     QList<QList<long long>> createProper3x3Grid(long long centerPixel, int order) const;
+    void verifyGridAlignment(long long centerPixel, int order) const;
 										 
 private slots:
     void onReplyFinished();
