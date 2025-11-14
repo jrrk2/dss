@@ -8,7 +8,6 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QLineEdit>
-#include <QBuffer>
 #include <QComboBox>
 #include <QSpinBox>
 #include <QDoubleSpinBox>
@@ -18,6 +17,15 @@
 #include <QProgressBar>
 #include <QCheckBox>
 #include <QListWidget>
+#include <QTemporaryFile>
+#include <fitsio.h>
+#include <QBuffer>
+#include <cmath>
+#include <QImage>
+#include <QByteArray>
+#include <fitsio.h>
+#include <vector>
+#include <algorithm>
 
 class DSSViewerWindow : public QWidget {
     Q_OBJECT
@@ -37,7 +45,6 @@ private:
     QDoubleSpinBox* widthSpinBox;
     QDoubleSpinBox* heightSpinBox;
     QComboBox* surveyCombo;
-    QComboBox* formatCombo;
     
     QPushButton* fetchObjectBtn;
     QPushButton* fetchCompositeBtn;
@@ -159,13 +166,10 @@ private:
         surveyLayout->addWidget(surveyCombo);
         paramLayout->addLayout(surveyLayout);
         
-        QHBoxLayout* formatLayout = new QHBoxLayout();
-        formatLayout->addWidget(new QLabel("Format:"));
-        formatCombo = new QComboBox();
-        formatCombo->addItem("GIF (Display)", (int)ImageFormat::GIF);
-        formatCombo->addItem("FITS (Science)", (int)ImageFormat::FITS);
-        formatLayout->addWidget(formatCombo);
-        paramLayout->addLayout(formatLayout);
+        // Format is always FITS - no need for combo box
+        QLabel* formatInfo = new QLabel("Format: FITS");
+        formatInfo->setStyleSheet("QLabel { font-weight: bold; color: #666; }");
+        paramLayout->addWidget(formatInfo);
         
         leftPanel->addWidget(paramGroup);
         
@@ -366,15 +370,14 @@ private slots:
         setControlsEnabled(false);
         
         DSSurvey survey = (DSSurvey)surveyCombo->currentData().toInt();
-        ImageFormat format = (ImageFormat)formatCombo->currentData().toInt();
         
-        // Fetch using coordinates from catalog
+        // Always fetch FITS format
         fetcher->fetchByCoordinates(currentObject.sky_position.ra_deg,
                                    currentObject.sky_position.dec_deg,
                                    widthSpinBox->value(),
                                    heightSpinBox->value(),
                                    survey,
-                                   format);
+                                   ImageFormat::FITS);
     }
     
     void onFetchComposite() {
@@ -389,19 +392,19 @@ private slots:
         redImage = QImage();
         blueImage = QImage();
         
-        statusLabel->setText(QString("Fetching composite image for %1 (1/3: IR)...").arg(currentObject.name));
+        statusLabel->setText(QString("Fetching composite FITS for %1 (1/3: IR)...").arg(currentObject.name));
         progressBar->show();
         progressBar->setRange(0, 3);
         progressBar->setValue(0);
         setControlsEnabled(false);
         
-        // Fetch IR first
+        // Fetch IR first - use FITS format
         fetcher->fetchByCoordinates(currentObject.sky_position.ra_deg,
                                    currentObject.sky_position.dec_deg,
                                    widthSpinBox->value(),
                                    heightSpinBox->value(),
                                    DSSurvey::POSS2UKSTU_IR,
-                                   ImageFormat::GIF);
+                                   ImageFormat::FITS);
     }
     
     void continueCompositeFetch() {
@@ -409,23 +412,23 @@ private slots:
         progressBar->setValue(compositeFetchCount);
         
         if (compositeFetchCount == 1) {
-            // Fetch Red next
-            statusLabel->setText(QString("Fetching composite image for %1 (2/3: Red)...").arg(currentObject.name));
+            // Fetch Red next - always FITS
+            statusLabel->setText(QString("Fetching composite FITS for %1 (2/3: Red)...").arg(currentObject.name));
             fetcher->fetchByCoordinates(currentObject.sky_position.ra_deg,
                                        currentObject.sky_position.dec_deg,
                                        widthSpinBox->value(),
                                        heightSpinBox->value(),
                                        DSSurvey::POSS2UKSTU_RED,
-                                       ImageFormat::GIF);
+                                       ImageFormat::FITS);
         } else if (compositeFetchCount == 2) {
-            // Fetch Blue last
-            statusLabel->setText(QString("Fetching composite image for %1 (3/3: Blue)...").arg(currentObject.name));
+            // Fetch Blue last - always FITS
+            statusLabel->setText(QString("Fetching composite FITS for %1 (3/3: Blue)...").arg(currentObject.name));
             fetcher->fetchByCoordinates(currentObject.sky_position.ra_deg,
                                        currentObject.sky_position.dec_deg,
                                        widthSpinBox->value(),
                                        heightSpinBox->value(),
                                        DSSurvey::POSS2UKSTU_BLUE,
-                                       ImageFormat::GIF);
+                                       ImageFormat::FITS);
         } else if (compositeFetchCount == 3) {
             // All images fetched, create composite
             createFalseColorComposite();
@@ -483,6 +486,9 @@ private slots:
                 compositeLine[x] = qRgb(irValue, redValue, blueValue);
             }
         }
+        
+        // Mirror vertically to correct FITS orientation
+        composite = composite.mirrored(false, true);
         
         // Display the composite
         currentImage = composite;
@@ -549,6 +555,29 @@ private slots:
     }
     
     void onFitsReceived(const QByteArray& fitsData) {
+        if (fetchingComposite) {
+            // Convert FITS to QImage for composite processing
+            QImage img = parseFitsToImage(fitsData);
+            
+            if (img.isNull()) {
+                onError("Failed to parse FITS data for composite");
+                return;
+            }
+            
+            // Store image based on fetch count
+            if (compositeFetchCount == 0) {
+                irImage = img;
+            } else if (compositeFetchCount == 1) {
+                redImage = img;
+            } else if (compositeFetchCount == 2) {
+                blueImage = img;
+            }
+            
+            // Continue to next image or create composite
+            continueCompositeFetch();
+            return;
+        }
+        
         currentImageData = fitsData;
         currentImage = QImage(); // Clear image since we have raw FITS data
         
@@ -564,6 +593,102 @@ private slots:
         saveImageBtn->setEnabled(true);
     }
     
+    QImage parseFitsToImage(const QByteArray &fitsData)
+    {
+	if (fitsData.isEmpty())
+	    return QImage();
+
+	fitsfile *fptr = nullptr;
+	int status = 0;
+
+	// CFITSIO requires a non-const memory pointer
+	QByteArray mutableData = fitsData;
+	size_t memsize = mutableData.size();
+	void *(*mem_realloc)(void *p, size_t newsize);
+	char *data = mutableData.data();
+
+	// Open FITS from memory
+	if (fits_open_memfile(&fptr,
+			      "memory.fits",
+			      READONLY,
+			      (void**)&data,
+			      &memsize,
+			      0,
+			      mem_realloc,
+			      &status))
+	{
+	    fits_report_error(stderr, status);
+	    return QImage();
+	}
+
+	// Ensure it's an image HDU
+	int hdutype = 0;
+	fits_get_hdu_type(fptr, &hdutype, &status);
+	if (hdutype != IMAGE_HDU)
+	{
+	    fits_close_file(fptr, &status);
+	    return QImage();
+	}
+
+	// Read image parameters
+	int bitpix = 0, naxis = 0;
+	long naxes[3] = {1, 1, 1};
+
+	fits_get_img_param(fptr, 3, &bitpix, &naxis, naxes, &status);
+
+	if (naxis < 2)   // must be at least 2D
+	{
+	    fits_close_file(fptr, &status);
+	    return QImage();
+	}
+
+	const int width  = naxes[0];
+	const int height = naxes[1];
+
+	// --- Read pixel data into a float buffer ---
+	const long npixels = width * height;
+	std::vector<float> buffer(npixels);
+
+	long fpixel[3] = {1, 1, 1};
+	if (fits_read_pix(fptr, TFLOAT, fpixel, npixels, NULL, buffer.data(), NULL, &status))
+	{
+	    fits_report_error(stderr, status);
+	    fits_close_file(fptr, &status);
+	    return QImage();
+	}
+
+	fits_close_file(fptr, &status);
+
+	// --- Compute min/max for scaling ---
+	auto [minIt, maxIt] = std::minmax_element(buffer.begin(), buffer.end());
+	float minVal = *minIt;
+	float maxVal = *maxIt;
+
+	if (minVal == maxVal)
+	    maxVal = minVal + 1.0;   // avoid divide-by-zero
+
+	const float scale = 255.0f / (maxVal - minVal);
+
+	// --- Create an 8-bit grayscale QImage ---
+	QImage img(width, height, QImage::Format_Grayscale8);
+
+	for (int y = 0; y < height; ++y)
+	{
+	    uchar *scan = img.scanLine(y);
+	    for (int x = 0; x < width; ++x)
+	    {
+		float v = buffer[y * width + x];
+		int scaled = int((v - minVal) * scale + 0.5f);
+		if (scaled < 0)   scaled = 0;
+		if (scaled > 255) scaled = 255;
+
+		scan[x] = uchar(scaled);
+	    }
+	}
+
+	return img;
+    }
+  
     void onError(const QString& error) {
         if (fetchingComposite) {
             statusLabel->setText(QString("Error fetching composite for %1: %2")
@@ -596,61 +721,60 @@ private slots:
         bool isComposite = !irImage.isNull() && !redImage.isNull() && !blueImage.isNull();
         
         if (isComposite) {
-            // Composite images can be saved as PNG/TIFF or 3-plane FITS
-            filter = "3-Plane FITS (*.fits);;PNG Images (*.png);;TIFF Images (*.tiff);;All Files (*)";
+            // Composite images saved as 3-plane FITS
+            filter = "3-Plane FITS (*.fits);;All Files (*)";
             defaultName += "_composite.fits";
-        } else if (formatCombo->currentData().toInt() == (int)ImageFormat::FITS) {
-            // FITS format - save raw data
+        } else {
+            // Single survey FITS
             filter = "FITS Files (*.fits);;All Files (*)";
             defaultName += ".fits";
-        } else {
-            // GIF format - allow multiple output formats
-            filter = "PNG Images (*.png);;GIF Images (*.gif);;JPEG Images (*.jpg);;All Files (*)";
-            defaultName += ".png";
         }
         
         QString fileName = QFileDialog::getSaveFileName(this,
-                                                       "Save DSS Image",
+                                                       "Save DSS FITS Image",
                                                        defaultName,
                                                        filter);
         
         if (!fileName.isEmpty()) {
             bool success = false;
-            QString ext = QFileInfo(fileName).suffix().toLower();
             
-            // Check if saving composite as FITS
-            if (isComposite && ext == "fits") {
+            // Save composite as 3-plane FITS
+            if (isComposite) {
                 success = saveCompositeFits(fileName);
-            } else if (isComposite || !currentImage.isNull()) {
-                // Save as image file - determine format from extension
-                const char* format = nullptr;
-                
-                if (ext == "png") format = "PNG";
-                else if (ext == "jpg" || ext == "jpeg") format = "JPEG";
-                else if (ext == "gif") format = "GIF";
-                else if (ext == "tiff" || ext == "tif") format = "TIFF";
-                else if (ext == "bmp") format = "BMP";
-                else format = "PNG"; // Default to PNG
-                
-                success = currentImage.save(fileName, format);
             } else if (!currentImageData.isEmpty()) {
-                // Save raw data (FITS or original format)
+                // Save raw FITS data
                 success = fetcher->saveImage(currentImageData, fileName);
             }
             
             if (success) {
-                statusLabel->setText(QString("Image saved to: %1").arg(fileName));
+                statusLabel->setText(QString("FITS image saved to: %1").arg(fileName));
                 QMessageBox::information(this, "Success", 
-                    QString("DSS image of %1 saved successfully!").arg(currentObject.name));
+                    QString("DSS FITS image of %1 saved successfully!").arg(currentObject.name));
             } else {
-                statusLabel->setText("Failed to save image");
-                QMessageBox::critical(this, "Error", "Failed to save image file!");
+                statusLabel->setText("Failed to save FITS image");
+                QMessageBox::critical(this, "Error", "Failed to save FITS file!");
             }
         }
     }
     
     bool saveCompositeFits(const QString& fileName) {
         if (irImage.isNull() || redImage.isNull() || blueImage.isNull()) {
+            return false;
+        }
+        
+        // Use cfitsio to write 3-plane FITS
+        fitsfile* fptr = nullptr;
+        int status = 0;
+        
+        // Remove file if it exists
+        QFile::remove(fileName);
+        
+        // Create new FITS file
+        QString fitsPath = "!" + fileName; // ! prefix forces overwrite
+        if (fits_create_file(&fptr, fitsPath.toLocal8Bit().constData(), &status)) {
+            char err_text[31];
+            fits_get_errstatus(status, err_text);
+            qDebug() << "CFITSIO error creating file:" << err_text;
             return false;
         }
         
@@ -662,85 +786,88 @@ private slots:
         QImage red = redImage.convertToFormat(QImage::Format_Grayscale8);
         QImage blue = blueImage.convertToFormat(QImage::Format_Grayscale8);
         
-        // Create FITS file
-        QFile file(fileName);
-        if (!file.open(QIODevice::WriteOnly)) {
+        // Create 3D image: width x height x 3 planes
+        long naxes[3] = {width, height, 3};
+        if (fits_create_img(fptr, BYTE_IMG, 3, naxes, &status)) {
+            char err_text[31];
+            fits_get_errstatus(status, err_text);
+            qDebug() << "CFITSIO error creating image:" << err_text;
+            fits_close_file(fptr, &status);
             return false;
         }
         
-        // Write FITS header (2880 bytes, padded with spaces)
-        QByteArray header(2880, ' ');
-        int pos = 0;
+        // Write header keywords
+        fits_write_key(fptr, TSTRING, "OBJECT", (void*)currentObject.name.toLocal8Bit().data(),
+                      "Messier object", &status);
+        fits_write_key(fptr, TSTRING, "TELESCOP", (void*)"DSS", "Digitized Sky Survey", &status);
         
-        auto writeKeyword = [&](const QString& key, const QString& value, const QString& comment = "") {
-            QString line = QString("%1= %2").arg(key, -8).arg(value, -20);
-            if (!comment.isEmpty()) {
-                line += QString(" / %1").arg(comment);
-            }
-            line = line.leftJustified(80, ' ');
-            header.replace(pos, 80, line.toLatin1());
-            pos += 80;
-        };
+        char plane1[] = "IR";
+        char plane2[] = "Red";
+        char plane3[] = "Blue";
+        fits_write_key(fptr, TSTRING, "PLANE1", plane1, "POSS2/UKSTU Infrared", &status);
+        fits_write_key(fptr, TSTRING, "PLANE2", plane2, "POSS2/UKSTU Red", &status);
+        fits_write_key(fptr, TSTRING, "PLANE3", plane3, "POSS2/UKSTU Blue", &status);
         
-        writeKeyword("SIMPLE", "T", "file conforms to FITS standard");
-        writeKeyword("BITPIX", "8", "8-bit unsigned integer");
-        writeKeyword("NAXIS", "3", "number of data axes");
-        writeKeyword("NAXIS1", QString::number(width), "width in pixels");
-        writeKeyword("NAXIS2", QString::number(height), "height in pixels");
-        writeKeyword("NAXIS3", "3", "number of planes (IR, Red, Blue)");
-        writeKeyword("EXTEND", "T", "extensions may be present");
-        writeKeyword("OBJECT", QString("'%1'").arg(currentObject.name), "Messier object");
-        writeKeyword("TELESCOP", "'DSS'", "Digitized Sky Survey");
-        writeKeyword("PLANE1", "'IR'", "POSS2/UKSTU Infrared");
-        writeKeyword("PLANE2", "'Red'", "POSS2/UKSTU Red");
-        writeKeyword("PLANE3", "'Blue'", "POSS2/UKSTU Blue");
-        writeKeyword("BSCALE", "1.0", "physical = BZERO + BSCALE*array");
-        writeKeyword("BZERO", "0.0", "physical = BZERO + BSCALE*array");
-        writeKeyword("CRVAL1", QString::number(currentObject.sky_position.ra_deg, 'f', 6), "RA in degrees");
-        writeKeyword("CRVAL2", QString::number(currentObject.sky_position.dec_deg, 'f', 6), "Dec in degrees");
-        writeKeyword("CRPIX1", QString::number(width / 2.0, 'f', 1), "reference pixel X");
-        writeKeyword("CRPIX2", QString::number(height / 2.0, 'f', 1), "reference pixel Y");
-        writeKeyword("CTYPE1", "'RA---TAN'", "coordinate type");
-        writeKeyword("CTYPE2", "'DEC--TAN'", "coordinate type");
-        writeKeyword("EQUINOX", "2000.0", "equinox of coordinates");
+        double ra = currentObject.sky_position.ra_deg;
+        double dec = currentObject.sky_position.dec_deg;
+        fits_write_key(fptr, TDOUBLE, "CRVAL1", &ra, "RA in degrees", &status);
+        fits_write_key(fptr, TDOUBLE, "CRVAL2", &dec, "Dec in degrees", &status);
         
-        // Calculate pixel scale (approximate based on FOV)
+        double crpix1 = width / 2.0;
+        double crpix2 = height / 2.0;
+        fits_write_key(fptr, TDOUBLE, "CRPIX1", &crpix1, "Reference pixel X", &status);
+        fits_write_key(fptr, TDOUBLE, "CRPIX2", &crpix2, "Reference pixel Y", &status);
+        
+        char ctype1[] = "RA---TAN";
+        char ctype2[] = "DEC--TAN";
+        fits_write_key(fptr, TSTRING, "CTYPE1", ctype1, "Coordinate type", &status);
+        fits_write_key(fptr, TSTRING, "CTYPE2", ctype2, "Coordinate type", &status);
+        
+        double equinox = 2000.0;
+        fits_write_key(fptr, TDOUBLE, "EQUINOX", &equinox, "Equinox of coordinates", &status);
+        
+        // Calculate pixel scale
         double pixelScaleWidth = (widthSpinBox->value() * 60.0) / width;  // arcsec/pixel
         double pixelScaleHeight = (heightSpinBox->value() * 60.0) / height;
+        double cdelt1 = -pixelScaleWidth / 3600.0; // degrees per pixel (negative for RA)
+        double cdelt2 = pixelScaleHeight / 3600.0;
         
-        writeKeyword("CDELT1", QString::number(-pixelScaleWidth / 3600.0, 'e', 6), "degrees per pixel");
-        writeKeyword("CDELT2", QString::number(pixelScaleHeight / 3600.0, 'e', 6), "degrees per pixel");
+        fits_write_key(fptr, TDOUBLE, "CDELT1", &cdelt1, "Degrees per pixel", &status);
+        fits_write_key(fptr, TDOUBLE, "CDELT2", &cdelt2, "Degrees per pixel", &status);
         
-        // END keyword must be present
-        QString endLine = QString("END").leftJustified(80, ' ');
-        header.replace(pos, 80, endLine.toLatin1());
+        // Allocate buffer for one plane
+        unsigned char* buffer = new unsigned char[width * height];
         
-        file.write(header);
+        // Write each plane (IR, Red, Blue)
+        const QImage* planes[3] = {&ir, &red, &blue};
         
-        // Write image data planes (IR, Red, Blue)
-        // FITS uses row-major order, top to bottom
         for (int plane = 0; plane < 3; ++plane) {
-            const QImage* img;
-            if (plane == 0) img = &ir;
-            else if (plane == 1) img = &red;
-            else img = &blue;
+            // Copy image data to buffer (flip vertically for FITS)
+            for (int y = 0; y < height; ++y) {
+                const uchar* srcLine = planes[plane]->constScanLine(height - 1 - y);
+                memcpy(buffer + y * width, srcLine, width);
+            }
             
-            for (int y = height - 1; y >= 0; --y) {  // FITS: bottom to top
-                const uchar* line = img->constScanLine(y);
-                file.write(reinterpret_cast<const char*>(line), width);
+            // Write plane
+            long fpixel[3] = {1, 1, plane + 1};
+            long nelements = width * height;
+            
+            if (fits_write_pix(fptr, TBYTE, fpixel, nelements, buffer, &status)) {
+                char err_text[31];
+                fits_get_errstatus(status, err_text);
+                qDebug() << "CFITSIO error writing plane" << plane << ":" << err_text;
+                delete[] buffer;
+                fits_close_file(fptr, &status);
+                return false;
             }
         }
         
-        // Pad to multiple of 2880 bytes
-        qint64 dataSize = width * height * 3;
-        qint64 padding = (2880 - (dataSize % 2880)) % 2880;
-        if (padding > 0) {
-            QByteArray pad(padding, 0);
-            file.write(pad);
-        }
+        delete[] buffer;
         
-        file.close();
-        return true;
+        // Close file
+        fits_close_file(fptr, &status);
+        
+        return status == 0;
     }
     
     void setControlsEnabled(bool enabled) {
@@ -753,7 +880,6 @@ private slots:
         widthSpinBox->setEnabled(enabled);
         heightSpinBox->setEnabled(enabled);
         surveyCombo->setEnabled(enabled);
-        formatCombo->setEnabled(enabled);
     }
 };
 
