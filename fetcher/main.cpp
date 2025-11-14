@@ -7,8 +7,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
-#include <QBuffer>
 #include <QLineEdit>
+#include <QBuffer>
 #include <QComboBox>
 #include <QSpinBox>
 #include <QDoubleSpinBox>
@@ -550,12 +550,13 @@ private slots:
     
     void onFitsReceived(const QByteArray& fitsData) {
         currentImageData = fitsData;
+        currentImage = QImage(); // Clear image since we have raw FITS data
         
-        imageLabel->setText(QString("FITS data received for %1\n%2 bytes\n\nUse 'Save Image' to save FITS file")
+        imageLabel->setText(QString("FITS data received for %1\n%2 bytes\n\nThis is raw FITS format data.\nUse 'Save Image' to save the FITS file.")
                            .arg(currentObject.name)
                            .arg(fitsData.size()));
         
-        statusLabel->setText(QString("FITS data loaded: %1 bytes").arg(fitsData.size()));
+        statusLabel->setText(QString("FITS data loaded: %1 bytes (raw format)").arg(fitsData.size()));
         statusLabel->setStyleSheet("QLabel { padding: 5px; background-color: #d4edda; color: #155724; }");
         
         progressBar->hide();
@@ -585,20 +586,27 @@ private slots:
     }
     
     void onSaveImage() {
-        if (currentImageData.isEmpty()) {
+        if (currentImageData.isEmpty() && currentImage.isNull()) {
             QMessageBox::warning(this, "No Data", "No image data to save!");
             return;
         }
         
         QString filter;
         QString defaultName = currentObject.name.replace(" ", "_");
+        bool isComposite = !irImage.isNull() && !redImage.isNull() && !blueImage.isNull();
         
-        if (fetchingComposite || formatCombo->currentData().toInt() == (int)ImageFormat::GIF) {
-            filter = "PNG Images (*.png);;GIF Images (*.gif);;All Files (*)";
-            defaultName += "_composite.png";
-        } else {
+        if (isComposite) {
+            // Composite images can be saved as PNG/TIFF or 3-plane FITS
+            filter = "3-Plane FITS (*.fits);;PNG Images (*.png);;TIFF Images (*.tiff);;All Files (*)";
+            defaultName += "_composite.fits";
+        } else if (formatCombo->currentData().toInt() == (int)ImageFormat::FITS) {
+            // FITS format - save raw data
             filter = "FITS Files (*.fits);;All Files (*)";
             defaultName += ".fits";
+        } else {
+            // GIF format - allow multiple output formats
+            filter = "PNG Images (*.png);;GIF Images (*.gif);;JPEG Images (*.jpg);;All Files (*)";
+            defaultName += ".png";
         }
         
         QString fileName = QFileDialog::getSaveFileName(this,
@@ -607,7 +615,30 @@ private slots:
                                                        filter);
         
         if (!fileName.isEmpty()) {
-            if (fetcher->saveImage(currentImageData, fileName)) {
+            bool success = false;
+            QString ext = QFileInfo(fileName).suffix().toLower();
+            
+            // Check if saving composite as FITS
+            if (isComposite && ext == "fits") {
+                success = saveCompositeFits(fileName);
+            } else if (isComposite || !currentImage.isNull()) {
+                // Save as image file - determine format from extension
+                const char* format = nullptr;
+                
+                if (ext == "png") format = "PNG";
+                else if (ext == "jpg" || ext == "jpeg") format = "JPEG";
+                else if (ext == "gif") format = "GIF";
+                else if (ext == "tiff" || ext == "tif") format = "TIFF";
+                else if (ext == "bmp") format = "BMP";
+                else format = "PNG"; // Default to PNG
+                
+                success = currentImage.save(fileName, format);
+            } else if (!currentImageData.isEmpty()) {
+                // Save raw data (FITS or original format)
+                success = fetcher->saveImage(currentImageData, fileName);
+            }
+            
+            if (success) {
                 statusLabel->setText(QString("Image saved to: %1").arg(fileName));
                 QMessageBox::information(this, "Success", 
                     QString("DSS image of %1 saved successfully!").arg(currentObject.name));
@@ -616,6 +647,100 @@ private slots:
                 QMessageBox::critical(this, "Error", "Failed to save image file!");
             }
         }
+    }
+    
+    bool saveCompositeFits(const QString& fileName) {
+        if (irImage.isNull() || redImage.isNull() || blueImage.isNull()) {
+            return false;
+        }
+        
+        // Ensure all images are same size and format
+        int width = irImage.width();
+        int height = irImage.height();
+        
+        QImage ir = irImage.convertToFormat(QImage::Format_Grayscale8);
+        QImage red = redImage.convertToFormat(QImage::Format_Grayscale8);
+        QImage blue = blueImage.convertToFormat(QImage::Format_Grayscale8);
+        
+        // Create FITS file
+        QFile file(fileName);
+        if (!file.open(QIODevice::WriteOnly)) {
+            return false;
+        }
+        
+        // Write FITS header (2880 bytes, padded with spaces)
+        QByteArray header(2880, ' ');
+        int pos = 0;
+        
+        auto writeKeyword = [&](const QString& key, const QString& value, const QString& comment = "") {
+            QString line = QString("%1= %2").arg(key, -8).arg(value, -20);
+            if (!comment.isEmpty()) {
+                line += QString(" / %1").arg(comment);
+            }
+            line = line.leftJustified(80, ' ');
+            header.replace(pos, 80, line.toLatin1());
+            pos += 80;
+        };
+        
+        writeKeyword("SIMPLE", "T", "file conforms to FITS standard");
+        writeKeyword("BITPIX", "8", "8-bit unsigned integer");
+        writeKeyword("NAXIS", "3", "number of data axes");
+        writeKeyword("NAXIS1", QString::number(width), "width in pixels");
+        writeKeyword("NAXIS2", QString::number(height), "height in pixels");
+        writeKeyword("NAXIS3", "3", "number of planes (IR, Red, Blue)");
+        writeKeyword("EXTEND", "T", "extensions may be present");
+        writeKeyword("OBJECT", QString("'%1'").arg(currentObject.name), "Messier object");
+        writeKeyword("TELESCOP", "'DSS'", "Digitized Sky Survey");
+        writeKeyword("PLANE1", "'IR'", "POSS2/UKSTU Infrared");
+        writeKeyword("PLANE2", "'Red'", "POSS2/UKSTU Red");
+        writeKeyword("PLANE3", "'Blue'", "POSS2/UKSTU Blue");
+        writeKeyword("BSCALE", "1.0", "physical = BZERO + BSCALE*array");
+        writeKeyword("BZERO", "0.0", "physical = BZERO + BSCALE*array");
+        writeKeyword("CRVAL1", QString::number(currentObject.sky_position.ra_deg, 'f', 6), "RA in degrees");
+        writeKeyword("CRVAL2", QString::number(currentObject.sky_position.dec_deg, 'f', 6), "Dec in degrees");
+        writeKeyword("CRPIX1", QString::number(width / 2.0, 'f', 1), "reference pixel X");
+        writeKeyword("CRPIX2", QString::number(height / 2.0, 'f', 1), "reference pixel Y");
+        writeKeyword("CTYPE1", "'RA---TAN'", "coordinate type");
+        writeKeyword("CTYPE2", "'DEC--TAN'", "coordinate type");
+        writeKeyword("EQUINOX", "2000.0", "equinox of coordinates");
+        
+        // Calculate pixel scale (approximate based on FOV)
+        double pixelScaleWidth = (widthSpinBox->value() * 60.0) / width;  // arcsec/pixel
+        double pixelScaleHeight = (heightSpinBox->value() * 60.0) / height;
+        
+        writeKeyword("CDELT1", QString::number(-pixelScaleWidth / 3600.0, 'e', 6), "degrees per pixel");
+        writeKeyword("CDELT2", QString::number(pixelScaleHeight / 3600.0, 'e', 6), "degrees per pixel");
+        
+        // END keyword must be present
+        QString endLine = QString("END").leftJustified(80, ' ');
+        header.replace(pos, 80, endLine.toLatin1());
+        
+        file.write(header);
+        
+        // Write image data planes (IR, Red, Blue)
+        // FITS uses row-major order, top to bottom
+        for (int plane = 0; plane < 3; ++plane) {
+            const QImage* img;
+            if (plane == 0) img = &ir;
+            else if (plane == 1) img = &red;
+            else img = &blue;
+            
+            for (int y = height - 1; y >= 0; --y) {  // FITS: bottom to top
+                const uchar* line = img->constScanLine(y);
+                file.write(reinterpret_cast<const char*>(line), width);
+            }
+        }
+        
+        // Pad to multiple of 2880 bytes
+        qint64 dataSize = width * height * 3;
+        qint64 padding = (2880 - (dataSize % 2880)) % 2880;
+        if (padding > 0) {
+            QByteArray pad(padding, 0);
+            file.write(pad);
+        }
+        
+        file.close();
+        return true;
     }
     
     void setControlsEnabled(bool enabled) {
