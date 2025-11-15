@@ -6,6 +6,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QBuffer>
 #include <QProgressBar>
 #include <QTableWidget>
 #include <QHeaderView>
@@ -260,7 +261,7 @@ private:
         size_t memsize = mutableData.size();
         void* (*mem_realloc)(void*, size_t) = nullptr;
         char* data = mutableData.data();
-        
+
         if (fits_open_memfile(&fptr, "memory.fits", READONLY,
                              (void**)&data, &memsize, 0, mem_realloc, &status)) {
             return false;

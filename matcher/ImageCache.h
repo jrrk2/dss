@@ -14,12 +14,26 @@
 
 class ImageCache : public QObject {
     Q_OBJECT
-
+public:
+    QString surveyKey(DSSurvey survey) const {
+	  switch (survey) {
+	      case DSSurvey::POSS2UKSTU_RED:  return "poss2ukstu_red";
+	      case DSSurvey::POSS2UKSTU_BLUE: return "poss2ukstu_blue";
+	      case DSSurvey::POSS2UKSTU_IR:   return "poss2ukstu_ir";
+	      case DSSurvey::POSS1_RED:       return "poss1_red";
+	      case DSSurvey::POSS1_BLUE:      return "poss1_blue";
+	      case DSSurvey::QUICKV:          return "quickv";
+	      case DSSurvey::PHASE2_GSC2:     return "phase2_gsc2";
+	      case DSSurvey::PHASE2_GSC1:     return "phase2_gsc1";
+	      default:                        return "poss2ukstu_red";
+	  }
+      }
+  
 private:
     QString cacheDir;
     QString metadataFile;
     QJsonObject metadata;
-    
+
     // Generate cache key from parameters
     QString generateCacheKey(double ra, double dec, double width, double height,
                             const QString& survey, const QString& format) const {
@@ -149,26 +163,17 @@ public:
     struct CacheStats {
         int totalImages;
         qint64 totalSize;
-        int compositeImages;
-        int singleImages;
     };
     
     CacheStats getStats() const {
-        CacheStats stats = {0, 0, 0, 0};
+        CacheStats stats = {0, 0};
         
         QStringList keys = metadata.keys();
         stats.totalImages = keys.size();
         
         for (const QString& key : keys) {
             QJsonObject entry = metadata[key].toObject();
-            stats.totalSize += entry["size"].toVariant().toLongLong();
-            
-            QString format = entry["format"].toString();
-            if (format == "fits_composite") {
-                stats.compositeImages++;
-            } else {
-                stats.singleImages++;
-            }
+            stats.totalSize += entry["size"].toVariant().toLongLong();            
         }
         
         return stats;

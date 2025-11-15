@@ -30,6 +30,8 @@ enum class ImageFormat {
     GIF
 };
 
+#include "ImageCache.h"
+
 class DSSImageMatcher : public QObject {
     Q_OBJECT
 
@@ -67,12 +69,33 @@ public:
     }
 
     // Fetch DSS image by coordinates (RA/Dec in decimal degrees)
-    void fetchByCoordinates(double ra, double dec, 
+  void fetchByCoordinates( ImageCache* cache,
+			   double ra, double dec, 
                            double widthArcmin = 15.0, 
                            double heightArcmin = 15.0,
                            DSSurvey survey = DSSurvey::POSS2UKSTU_RED,
                            ImageFormat format = ImageFormat::GIF) {
-        
+
+        // Check cache first
+        if (cache->isCached(ra,
+			    dec,
+			    widthArcmin,
+			    heightArcmin,
+			    cache->surveyKey(survey), "fits")) {
+            
+            QByteArray cachedData = cache->getCachedImage(
+							  ra,
+							  dec,
+							  widthArcmin,
+							  heightArcmin,
+							  cache->surveyKey(survey), "fits");
+            
+            if (!cachedData.isEmpty()) {
+                fitsDataReceived(cachedData);
+                return;
+            }
+        }
+              
         QUrl url(baseUrl);
         QUrlQuery query;
         

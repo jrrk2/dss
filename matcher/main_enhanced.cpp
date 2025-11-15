@@ -100,6 +100,8 @@ public:
     }
 
 private:
+    DSSurvey lastSurveyRequested;
+
     void setupMenuBar() {
         QMenuBar* menuBar = new QMenuBar(this);
         setMenuBar(menuBar);
@@ -410,66 +412,25 @@ private slots:
         fetchingComposite = false;
         
         DSSurvey survey = (DSSurvey)surveyCombo->currentData().toInt();
-        QString surveyStr = surveyCombo->currentText();
-        
-        // Check cache first
-        if (cache->isCached(currentObject.sky_position.ra_deg,
-                           currentObject.sky_position.dec_deg,
-                           widthSpinBox->value(),
-                           heightSpinBox->value(),
-                           surveyStr, "fits")) {
-            statusLabel->setText(QString("Loading %1 from cache...").arg(currentObject.name));
-            
-            QByteArray cachedData = cache->getCachedImage(
-                currentObject.sky_position.ra_deg,
-                currentObject.sky_position.dec_deg,
-                widthSpinBox->value(),
-                heightSpinBox->value(),
-                surveyStr, "fits");
-            
-            if (!cachedData.isEmpty()) {
-                onFitsReceived(cachedData);
-                return;
-            }
-        }
+	lastSurveyRequested = survey;  // <--- remember
         
         statusLabel->setText(QString("Fetching DSS image for %1...").arg(currentObject.name));
         progressBar->show();
         setControlsEnabled(false);
         
-        matcher->fetchByCoordinates(currentObject.sky_position.ra_deg,
-                                   currentObject.sky_position.dec_deg,
-                                   widthSpinBox->value(),
-                                   heightSpinBox->value(),
-                                   survey,
-                                   ImageFormat::FITS);
+        matcher->fetchByCoordinates(cache,
+				    currentObject.sky_position.ra_deg,
+                                    currentObject.sky_position.dec_deg,
+                                    widthSpinBox->value(),
+                                    heightSpinBox->value(),
+                                    survey,
+                                    ImageFormat::FITS);
     }
     
     void onFetchComposite() {
         if (currentObject.name.isEmpty()) {
             QMessageBox::warning(this, "No Selection", "Please select a Messier object first!");
             return;
-        }
-        
-        // Check if composite is cached
-        if (cache->isCached(currentObject.sky_position.ra_deg,
-                           currentObject.sky_position.dec_deg,
-                           widthSpinBox->value(),
-                           heightSpinBox->value(),
-                           "composite", "fits")) {
-            statusLabel->setText(QString("Loading composite for %1 from cache...").arg(currentObject.name));
-            
-            QByteArray cachedData = cache->getCachedImage(
-                currentObject.sky_position.ra_deg,
-                currentObject.sky_position.dec_deg,
-                widthSpinBox->value(),
-                heightSpinBox->value(),
-                "composite", "fits");
-            
-            if (!cachedData.isEmpty()) {
-                loadCompositeFits(cachedData);
-                return;
-            }
         }
         
         fetchingComposite = true;
@@ -484,17 +445,16 @@ private slots:
         progressBar->setValue(0);
         setControlsEnabled(false);
         
-        matcher->fetchByCoordinates(currentObject.sky_position.ra_deg,
-                                   currentObject.sky_position.dec_deg,
-                                   widthSpinBox->value(),
-                                   heightSpinBox->value(),
-                                   DSSurvey::POSS2UKSTU_IR,
-                                   ImageFormat::FITS);
+        // First leg: IR
+        lastSurveyRequested = DSSurvey::POSS2UKSTU_IR;
+        matcher->fetchByCoordinates(cache,
+				    currentObject.sky_position.ra_deg,
+                                    currentObject.sky_position.dec_deg,
+                                    widthSpinBox->value(),
+                                    heightSpinBox->value(),
+                                    DSSurvey::POSS2UKSTU_IR,
+                                    ImageFormat::FITS);
     }
-    
-    // Rest of the implementation continues...
-    // (Including onImageReceived, onFitsReceived, composite handling, etc.)
-    // Due to length, I'll provide the key new methods:
     
     void onLoadUserFits() {
         QString fileName = QFileDialog::getOpenFileName(this,
@@ -533,13 +493,9 @@ private slots:
         QString info = QString(
             "Cache Statistics:\n\n"
             "Total Images: %1\n"
-            "  - Single Survey: %2\n"
-            "  - Composites: %3\n"
             "Total Size: %4 MB\n\n"
             "Cache Location:\n%5")
             .arg(stats.totalImages)
-            .arg(stats.singleImages)
-            .arg(stats.compositeImages)
             .arg(stats.totalSize / (1024.0 * 1024.0), 0, 'f', 2)
             .arg(cache->getCacheDirectory());
         
@@ -570,22 +526,26 @@ private slots:
         
         if (compositeFetchCount == 1) {
             // Fetch Red next - always FITS
+	    lastSurveyRequested = DSSurvey::POSS2UKSTU_RED;
             statusLabel->setText(QString("Fetching composite FITS for %1 (2/3: Red)...").arg(currentObject.name));
-            matcher->fetchByCoordinates(currentObject.sky_position.ra_deg,
-                                       currentObject.sky_position.dec_deg,
-                                       widthSpinBox->value(),
-                                       heightSpinBox->value(),
-                                       DSSurvey::POSS2UKSTU_RED,
-                                       ImageFormat::FITS);
+            matcher->fetchByCoordinates(cache,
+					currentObject.sky_position.ra_deg,
+                                        currentObject.sky_position.dec_deg,
+                                        widthSpinBox->value(),
+                                        heightSpinBox->value(),
+                                        DSSurvey::POSS2UKSTU_RED,
+                                        ImageFormat::FITS);
         } else if (compositeFetchCount == 2) {
             // Fetch Blue last - always FITS
+	    lastSurveyRequested = DSSurvey::POSS2UKSTU_BLUE;
             statusLabel->setText(QString("Fetching composite FITS for %1 (3/3: Blue)...").arg(currentObject.name));
-            matcher->fetchByCoordinates(currentObject.sky_position.ra_deg,
-                                       currentObject.sky_position.dec_deg,
-                                       widthSpinBox->value(),
-                                       heightSpinBox->value(),
-                                       DSSurvey::POSS2UKSTU_BLUE,
-                                       ImageFormat::FITS);
+            matcher->fetchByCoordinates(cache,
+					currentObject.sky_position.ra_deg,
+                                        currentObject.sky_position.dec_deg,
+                                        widthSpinBox->value(),
+                                        heightSpinBox->value(),
+                                        DSSurvey::POSS2UKSTU_BLUE,
+                                        ImageFormat::FITS);
         } else if (compositeFetchCount == 3) {
             // All images fetched, create composite
             createFalseColorComposite();
@@ -653,7 +613,7 @@ private slots:
         // Convert to byte array for saving
         QBuffer buffer(&currentImageData);
         buffer.open(QIODevice::WriteOnly);
-        composite.save(&buffer, "PNG");
+        composite.save(&buffer, "FITS");
         
         // Scale image to fit label
         QPixmap pixmap = QPixmap::fromImage(composite);
@@ -675,6 +635,16 @@ private slots:
     }
     
     void onImageReceived(const QImage& image, const QByteArray& rawData) {
+	cache->cacheImage(
+	    rawData,
+	    currentObject.sky_position.ra_deg,
+	    currentObject.sky_position.dec_deg,
+	    widthSpinBox->value(),
+	    heightSpinBox->value(),
+	    surveyCombo->currentText(),
+	    "gif",
+	    currentObject.name
+	);
         if (fetchingComposite) {
             // Store image based on fetch count
             if (compositeFetchCount == 0) {
@@ -712,8 +682,25 @@ private slots:
     }
   
     void onFitsReceived(const QByteArray& fitsData) {
+	// 1. Cache every FITS we download, regardless of composite/single.
+	//    This uses a canonical survey key derived from lastSurveyRequested.
+	if (!fitsData.isEmpty()) {
+	    QString surveyStr = cache->surveyKey(lastSurveyRequested);
+
+	    cache->cacheImage(
+		fitsData,
+		currentObject.sky_position.ra_deg,
+		currentObject.sky_position.dec_deg,
+		widthSpinBox->value(),
+		heightSpinBox->value(),
+		surveyStr,
+		"fits",                // no special "fits_composite" distinction
+		currentObject.name
+	    );
+	}
+
+	// 2. Composite path short-circuit stays as before, but now we've cached.
 	if (fetchingComposite) {
-	    // Convert FITS to QImage for composite processing
 	    QImage img = parseFitsToImage(fitsData);
 
 	    if (img.isNull()) {
@@ -735,40 +722,46 @@ private slots:
 	    return;
 	}
 
-	// Parse FITS data to display as image
+	// 3. Normal single-image display path (unchanged, except that
+	//    currentImageData is now the raw FITS we just cached).
 	currentImageData = fitsData;
 	currentImage = parseFitsToImage(fitsData);
 
 	if (currentImage.isNull()) {
-	    imageLabel->setText(QString("FITS data received for %1\n%2 bytes\n\nFailed to parse FITS data for display.\nUse 'Save Image' to save the raw FITS file.")
-			       .arg(currentObject.name)
-			       .arg(fitsData.size()));
+	    imageLabel->setText(QString(
+		"FITS data received for %1\n%2 bytes\n\n"
+		"Failed to parse FITS data for display.\n"
+		"Use 'Save Image' to save the raw FITS file.")
+		.arg(currentObject.name)
+		.arg(fitsData.size()));
 
-	    statusLabel->setText(QString("FITS data loaded: %1 bytes (parse failed)").arg(fitsData.size()));
-	    statusLabel->setStyleSheet("QLabel { padding: 5px; background-color: #fff3cd; color: #856404; }");
+	    statusLabel->setText(
+		QString("FITS data loaded: %1 bytes (parse failed)")
+		    .arg(fitsData.size()));
+	    statusLabel->setStyleSheet(
+		"QLabel { padding: 5px; background-color: #fff3cd; color: #856404; }");
 	} else {
-	    // Mirror vertically to correct FITS orientation
 	    currentImage = currentImage.mirrored(false, true);
 
-	    // Display the image
 	    QPixmap pixmap = QPixmap::fromImage(currentImage);
-	    imageLabel->setPixmap(pixmap.scaled(imageLabel->size(), 
-					       Qt::KeepAspectRatio, 
-					       Qt::SmoothTransformation));
+	    imageLabel->setPixmap(pixmap.scaled(imageLabel->size(),
+						Qt::KeepAspectRatio,
+						Qt::SmoothTransformation));
 
-	    statusLabel->setText(QString("FITS image loaded for %1: %2×%3 pixels (%4 bytes)")
-				.arg(currentObject.name)
-				.arg(currentImage.width())
-				.arg(currentImage.height())
-				.arg(fitsData.size()));
-	    statusLabel->setStyleSheet("QLabel { padding: 5px; background-color: #d4edda; color: #155724; }");
+	    statusLabel->setText(
+		QString("FITS image loaded for %1: %2×%3 pixels (%4 bytes)")
+		    .arg(currentObject.name)
+		    .arg(currentImage.width())
+		    .arg(currentImage.height())
+		    .arg(fitsData.size()));
+	    statusLabel->setStyleSheet(
+		"QLabel { padding: 5px; background-color: #d4edda; color: #155724; }");
 	}
 
 	progressBar->hide();
 	setControlsEnabled(true);
 	saveImageBtn->setEnabled(true);
-    }
-    
+    }    
     QImage parseFitsToImage(const QByteArray &fitsData)
     {
 	if (fitsData.isEmpty())
@@ -896,15 +889,9 @@ private slots:
         QString defaultName = currentObject.name.replace(" ", "_");
         bool isComposite = !irImage.isNull() && !redImage.isNull() && !blueImage.isNull();
         
-        if (isComposite) {
-            // Composite images saved as 3-plane FITS
-            filter = "3-Plane FITS (*.fits);;All Files (*)";
-            defaultName += "_composite.fits";
-        } else {
-            // Single survey FITS
-            filter = "FITS Files (*.fits);;All Files (*)";
-            defaultName += ".fits";
-        }
+	// Single survey FITS
+	filter = "FITS Files (*.fits);;All Files (*)";
+	defaultName += ".fits";
         
         QString fileName = QFileDialog::getSaveFileName(this,
                                                        "Save DSS FITS Image",
