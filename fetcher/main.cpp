@@ -553,44 +553,63 @@ private slots:
         setControlsEnabled(true);
         saveImageBtn->setEnabled(true);
     }
-    
+  
     void onFitsReceived(const QByteArray& fitsData) {
-        if (fetchingComposite) {
-            // Convert FITS to QImage for composite processing
-            QImage img = parseFitsToImage(fitsData);
-            
-            if (img.isNull()) {
-                onError("Failed to parse FITS data for composite");
-                return;
-            }
-            
-            // Store image based on fetch count
-            if (compositeFetchCount == 0) {
-                irImage = img;
-            } else if (compositeFetchCount == 1) {
-                redImage = img;
-            } else if (compositeFetchCount == 2) {
-                blueImage = img;
-            }
-            
-            // Continue to next image or create composite
-            continueCompositeFetch();
-            return;
-        }
-        
-        currentImageData = fitsData;
-        currentImage = QImage(); // Clear image since we have raw FITS data
-        
-        imageLabel->setText(QString("FITS data received for %1\n%2 bytes\n\nThis is raw FITS format data.\nUse 'Save Image' to save the FITS file.")
-                           .arg(currentObject.name)
-                           .arg(fitsData.size()));
-        
-        statusLabel->setText(QString("FITS data loaded: %1 bytes (raw format)").arg(fitsData.size()));
-        statusLabel->setStyleSheet("QLabel { padding: 5px; background-color: #d4edda; color: #155724; }");
-        
-        progressBar->hide();
-        setControlsEnabled(true);
-        saveImageBtn->setEnabled(true);
+	if (fetchingComposite) {
+	    // Convert FITS to QImage for composite processing
+	    QImage img = parseFitsToImage(fitsData);
+
+	    if (img.isNull()) {
+		onError("Failed to parse FITS data for composite");
+		return;
+	    }
+
+	    // Store image based on fetch count
+	    if (compositeFetchCount == 0) {
+		irImage = img;
+	    } else if (compositeFetchCount == 1) {
+		redImage = img;
+	    } else if (compositeFetchCount == 2) {
+		blueImage = img;
+	    }
+
+	    // Continue to next image or create composite
+	    continueCompositeFetch();
+	    return;
+	}
+
+	// Parse FITS data to display as image
+	currentImageData = fitsData;
+	currentImage = parseFitsToImage(fitsData);
+
+	if (currentImage.isNull()) {
+	    imageLabel->setText(QString("FITS data received for %1\n%2 bytes\n\nFailed to parse FITS data for display.\nUse 'Save Image' to save the raw FITS file.")
+			       .arg(currentObject.name)
+			       .arg(fitsData.size()));
+
+	    statusLabel->setText(QString("FITS data loaded: %1 bytes (parse failed)").arg(fitsData.size()));
+	    statusLabel->setStyleSheet("QLabel { padding: 5px; background-color: #fff3cd; color: #856404; }");
+	} else {
+	    // Mirror vertically to correct FITS orientation
+	    currentImage = currentImage.mirrored(false, true);
+
+	    // Display the image
+	    QPixmap pixmap = QPixmap::fromImage(currentImage);
+	    imageLabel->setPixmap(pixmap.scaled(imageLabel->size(), 
+					       Qt::KeepAspectRatio, 
+					       Qt::SmoothTransformation));
+
+	    statusLabel->setText(QString("FITS image loaded for %1: %2×%3 pixels (%4 bytes)")
+				.arg(currentObject.name)
+				.arg(currentImage.width())
+				.arg(currentImage.height())
+				.arg(fitsData.size()));
+	    statusLabel->setStyleSheet("QLabel { padding: 5px; background-color: #d4edda; color: #155724; }");
+	}
+
+	progressBar->hide();
+	setControlsEnabled(true);
+	saveImageBtn->setEnabled(true);
     }
     
     QImage parseFitsToImage(const QByteArray &fitsData)
